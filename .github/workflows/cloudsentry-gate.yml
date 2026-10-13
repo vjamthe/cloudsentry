@@ -1,0 +1,105 @@
+name: CloudSentry security gate
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/cloudsentry-gate.yml"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # lets GitHub get a short-lived AWS token (OIDC)
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  ROLE_ARN: arn:aws:iam::754947718943:role/cloudsentry-github-actions
+  ECR_REPO: cloudsentry-demo-app
+  TABLE: cloudsentry-findings
+  CVE_THRESHOLD: "0.95"   # block fixable CVEs the model ranks above this
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - id: push
+        name: Build and push image
+        run: |
+          TAG=${GITHUB_SHA::7}
+          IMAGE=${{ steps.ecr.outputs.registry }}/$ECR_REPO:$TAG
+          docker build -t $IMAGE app/
+          docker push $IMAGE
+          DIGEST=$(aws ecr describe-images --repository-name $ECR_REPO --image-ids imageTag=$TAG \
+                   --query 'imageDetails[0].imageDigest' --output text)
+          echo "Pushed $IMAGE ($DIGEST)"
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+  security-gate:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Wait for CloudSentry verdict
+        env:
+          DIGEST: ${{ needs.build-and-push.outputs.digest }}
+        run: |
+          echo "Waiting for scan + ML scoring of $DIGEST ..."
+          for i in $(seq 1 60); do
+            aws dynamodb query --table-name $TABLE \
+              --key-condition-expression "image_digest = :d" \
+              --expression-attribute-values "{\":d\":{\"S\":\"$DIGEST\"}}" > results.json
+            if grep -q '"SBOM_ANALYSIS"' results.json; then echo "Verdict ready"; break; fi
+            sleep 15
+          done
+          grep -q '"SBOM_ANALYSIS"' results.json || { echo "No verdict after 15 min"; exit 1; }
+      - name: Evaluate gate
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          items = json.load(open("results.json"))["Items"]
+          thr = float(os.environ["CVE_THRESHOLD"])
+          sbom = next(i for i in items if i["finding_id"]["S"] == "SBOM_ANALYSIS")
+          verdict = sbom["verdict"]["S"]
+          score = sbom.get("anomaly_score", {}).get("N", "n/a")
+          offensive = [x["S"] for x in sbom.get("offensive_tools", {}).get("L", [])]
+          typos = [x["S"] for x in sbom.get("typosquats", {}).get("L", [])]
+
+          cves = [{"cve": i["cve"]["S"], "sev": i["severity"]["S"], "pkg": i["package"]["S"],
+                   "fix": i["fix_available"]["S"], "score": float(i["exploit_score"]["N"])}
+                  for i in items if i["finding_id"]["S"] != "SBOM_ANALYSIS" and "exploit_score" in i]
+          cves.sort(key=lambda c: -c["score"])
+          hot = [c for c in cves if c["score"] >= thr and c["fix"] == "YES"]
+
+          lines = ["## CloudSentry security gate", "",
+                   f"**SBOM verdict:** {verdict} (anomaly score {score})",
+                   f"**Offensive tools:** {offensive or 'none'} | **Typosquats:** {typos or 'none'}",
+                   f"**CVEs:** {len(cves)} total, {len(hot)} fixable above exploit score {thr}", "",
+                   "| CVE | Severity | Package | Fix | Exploit score |", "|---|---|---|---|---|"]
+          lines += [f"| {c['cve']} | {c['sev']} | {c['pkg']} | {c['fix']} | {c['score']:.3f} |" for c in cves[:10]]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a").write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+
+          reasons = []
+          if verdict in ("BLOCK", "REVIEW"): reasons.append(f"SBOM verdict {verdict}")
+          if hot: reasons.append(f"{len(hot)} fixable high-exploitability CVEs")
+          if reasons:
+              print("GATE FAILED:", "; ".join(reasons)); sys.exit(1)
+          print("GATE PASSED")
+          EOF
+
+  deploy:
+    needs: security-gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Gate passed, deploying image ${{ needs.build-and-push.outputs.digest }} (placeholder)"
