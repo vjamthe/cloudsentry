@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ["app/**", ".github/workflows/cloudsentry-gate.yml"]
   workflow_dispatch:
-  inputs:
+    inputs:
       app_dir:
         description: "Folder to build (e.g. app or tests/malicious-nmap)"
         default: "app"
@@ -46,7 +46,7 @@ jobs:
         run: |
           TAG=${GITHUB_SHA::7}
           IMAGE=${{ steps.ecr.outputs.registry }}/$ECR_REPO:$TAG
-          docker build -t $IMAGE app/
+          docker build -t $IMAGE ${{ inputs.app_dir || 'app' }}/
           docker push $IMAGE
           DIGEST=$(aws ecr describe-images --repository-name $ECR_REPO --image-ids imageTag=$TAG \
                    --query 'imageDetails[0].imageDigest' --output text)
