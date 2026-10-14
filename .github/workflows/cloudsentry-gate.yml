@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths: ["app/**", ".github/workflows/cloudsentry-gate.yml"]
   workflow_dispatch:
+  inputs:
+      app_dir:
+        description: "Folder to build (e.g. app or tests/malicious-nmap)"
+        default: "app"
 
 permissions:
   id-token: write   # lets GitHub get a short-lived AWS token (OIDC)
