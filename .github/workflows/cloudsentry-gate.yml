@@ -43,10 +43,12 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
       - id: push
         name: Build and push image
+        env:
+          APP_DIR: ${{ inputs.app_dir || 'app' }}
         run: |
           TAG=${GITHUB_SHA::7}
           IMAGE=${{ steps.ecr.outputs.registry }}/$ECR_REPO:$TAG
-          docker build -t $IMAGE ${{ inputs.app_dir || 'app' }}/
+          docker build -t $IMAGE "$APP_DIR/"
           docker push $IMAGE
           DIGEST=$(aws ecr describe-images --repository-name $ECR_REPO --image-ids imageTag=$TAG \
                    --query 'imageDetails[0].imageDigest' --output text)
