@@ -27,15 +27,8 @@ jobs:
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Debug OIDC claims
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const t = await core.getIDToken('sts.amazonaws.com');
-            const p = JSON.parse(Buffer.from(t.split('.')[1], 'base64').toString());
-            core.info(`sub=${p.sub} | aud=${p.aud}`);
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v5
+      - uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -59,7 +52,7 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ env.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
